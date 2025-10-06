@@ -1,0 +1,31 @@
+# Logs
+*.log
+C:/Logs/
+
+# Sensitive data
+*.csv
+*.json
+*password*
+*credential*
+*secret*
+
+# PowerShell
+*.ps1xml
+
+# IDE
+.vscode/
+.idea/
+*.code-workspace
+
+# OS
+Thumbs.db
+.DS_Store
+
+# Test results
+TestResults/
+*.trx
+
+# Backup files
+*.bak
+*.backup
+*~

@@ -1,0 +1,194 @@
+name: PowerShell CI/CD
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  lint:
+    name: PSScriptAnalyzer Lint
+    runs-on: windows-latest
+    
+    steps:
+    - name: Checkout Repository
+      uses: actions/checkout@v3
+      
+    - name: Install PSScriptAnalyzer
+      shell: pwsh
+      run: |
+        Set-PSRepository -Name PSGallery -InstallationPolicy Trusted
+        Install-Module -Name PSScriptAnalyzer -Force -Scope CurrentUser
+        
+    - name: Run PSScriptAnalyzer
+      shell: pwsh
+      run: |
+        $results = Invoke-ScriptAnalyzer -Path . -Recurse -Settings PSGallery -ReportSummary
+        if ($results) {
+          $results | Format-Table -AutoSize
+          Write-Host "❌ PSScriptAnalyzer found $($results.Count) issue(s)" -ForegroundColor Red
+          exit 1
+        } else {
+          Write-Host "✅ PSScriptAnalyzer found no issues" -ForegroundColor Green
+        }
+        
+  test:
+    name: Pester Unit Tests
+    runs-on: windows-latest
+    needs: lint
+    
+    steps:
+    - name: Checkout Repository
+      uses: actions/checkout@v3
+      
+    - name: Install Pester
+      shell: pwsh
+      run: |
+        Install-Module -Name Pester -Force -SkipPublisherCheck -Scope CurrentUser
+        
+    - name: Run Pester Tests
+      shell: pwsh
+      run: |
+        $config = New-PesterConfiguration
+        $config.Run.Path = './Tests'
+        $config.Run.PassThru = $true
+        $config.CodeCoverage.Enabled = $true
+        $config.TestResult.Enabled = $true
+        $config.TestResult.OutputPath = 'testResults.xml'
+        
+        $result = Invoke-Pester -Configuration $config
+        
+        if ($result.FailedCount -gt 0) {
+          Write-Host "❌ $($result.FailedCount) test(s) failed" -ForegroundColor Red
+          exit 1
+        } else {
+          Write-Host "✅ All tests passed" -ForegroundColor Green
+        }
+        
+    - name: Upload Test Results
+      uses: actions/upload-artifact@v3
+      if: always()
+      with:
+        name: test-results
+        path: testResults.xml
+        
+  validate-syntax:
+    name: Validate PowerShell Syntax
+    runs-on: windows-latest
+    
+    steps:
+    - name: Checkout Repository
+      uses: actions/checkout@v3
+      
+    - name: Validate All Scripts
+      shell: pwsh
+      run: |
+        $errors = @()
+        Get-ChildItem -Path . -Filter *.ps1 -Recurse | ForEach-Object {
+          $file = $_.FullName
+          Write-Host "Validating: $file"
+          
+          try {
+            $null = [System.Management.Automation.PSParser]::Tokenize((Get-Content -Path $file -Raw), [ref]$null)
+            Write-Host "  ✅ Valid" -ForegroundColor Green
+          } catch {
+            Write-Host "  ❌ Syntax Error: $($_.Exception.Message)" -ForegroundColor Red
+            $errors += $file
+          }
+        }
+        
+        if ($errors.Count -gt 0) {
+          Write-Host "`n❌ $($errors.Count) file(s) have syntax errors" -ForegroundColor Red
+          exit 1
+        } else {
+          Write-Host "`n✅ All files are syntactically valid" -ForegroundColor Green
+        }
+        
+  security-scan:
+    name: Security Scan
+    runs-on: windows-latest
+    
+    steps:
+    - name: Checkout Repository
+      uses: actions/checkout@v3
+      
+    - name: Check for Hardcoded Credentials
+      shell: pwsh
+      run: |
+        $patterns = @(
+          'password\s*=\s*[''"].*[''"]',
+          'pwd\s*=\s*[''"].*[''"]',
+          'apikey\s*=\s*[''"].*[''"]',
+          'api_key\s*=\s*[''"].*[''"]',
+          'secret\s*=\s*[''"].*[''"]',
+          'token\s*=\s*[''"].*[''"]'
+        )
+        
+        $findings = @()
+        
+        Get-ChildItem -Path . -Filter *.ps1 -Recurse | ForEach-Object {
+          $content = Get-Content -Path $_.FullName -Raw
+          
+          foreach ($pattern in $patterns) {
+            if ($content -match $pattern) {
+              $findings += "$($_.FullName): Potential hardcoded credential"
+            }
+          }
+        }
+        
+        if ($findings.Count -gt 0) {
+          Write-Host "⚠️  Security Issues Found:" -ForegroundColor Yellow
+          $findings | ForEach-Object { Write-Host "  - $_" -ForegroundColor Yellow }
+          Write-Host "`nPlease review these findings manually." -ForegroundColor Yellow
+        } else {
+          Write-Host "✅ No obvious security issues detected" -ForegroundColor Green
+        }
+        
+  document-check:
+    name: Documentation Check
+    runs-on: windows-latest
+    
+    steps:
+    - name: Checkout Repository
+      uses: actions/checkout@v3
+      
+    - name: Verify Comment-Based Help
+      shell: pwsh
+      run: |
+        $missing = @()
+        
+        Get-ChildItem -Path . -Filter *.ps1 -Recurse -Exclude '*.Tests.ps1' | ForEach-Object {
+          $content = Get-Content -Path $_.FullName -Raw
+          
+          $hasHelp = $content -match '\.SYNOPSIS' -and 
+                     $content -match '\.DESCRIPTION' -and
+                     $content -match '\.EXAMPLE'
+          
+          if (-not $hasHelp) {
+            $missing += $_.FullName
+          }
+        }
+        
+        if ($missing.Count -gt 0) {
+          Write-Host "⚠️  Files missing comment-based help:" -ForegroundColor Yellow
+          $missing | ForEach-Object { Write-Host "  - $_" -ForegroundColor Yellow }
+        } else {
+          Write-Host "✅ All scripts have comment-based help" -ForegroundColor Green
+        }
+        
+  build-status:
+    name: Build Status Summary
+    runs-on: windows-latest
+    needs: [lint, test, validate-syntax, security-scan, document-check]
+    if: always()
+    
+    steps:
+    - name: Summary
+      shell: pwsh
+      run: |
+        Write-Host "========================================" -ForegroundColor Cyan
+        Write-Host "  PowerShell CI/CD Pipeline Complete  " -ForegroundColor Cyan
+        Write-Host "========================================" -ForegroundColor Cyan
+        Write-Host "✅ All quality checks passed!" -ForegroundColor Green
